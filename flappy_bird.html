@@ -40,6 +40,7 @@ const BIRD_R     = 16;
 const SPEED_MIN  = 3, SPEED_MAX = 6.5;
 const GAP_MIN    = 105, GAP_MAX  = 150;
 const SPAWN_MIN  = 170, SPAWN_MAX = 280;
+const PIPE_MARGIN = 30;   // gap between pipe ends and canvas top/bottom
 
 function difficulty() {
   const t    = Math.min(score / 30, 1);
@@ -52,17 +53,24 @@ function difficulty() {
 }
 
 // ─── Board rotation ───────────────────────────────────────────
-const ROT_ACCEL = 0.0000025;
-const ROT_MAX   = 0.018;
+const ROT_ACCEL      = 0.0000025;
+const ROT_MAX        = 0.018;
+const START_HR_OFFSET = 0;   // game starts at current time
+const HR_PER_TUNNEL   = 4;   // hours advanced per tunnel
 
 // ─── Weather state ────────────────────────────────────────────
 // Snowmass Village, CO — lat/lon
 const SMV_LAT = 39.1955, SMV_LON = -106.9394;
 
-// Active theme — set by applyWeather(); defaults to snow until fetch completes
+// Active theme — set by applyHourOffset(); defaults to snow until fetch completes
 let theme = buildTheme('snow', 33);
 // Human-readable label shown on start screen
 let weatherLabel = 'Loading weather…';
+
+// Hourly forecast array — each entry: { isoTime, code, tempF }
+let hourlyForecast  = [];
+let baseHourIndex   = 0;   // index in hourlyForecast for "right now"
+let lastScoreWeather = -1; // last score at which we changed the theme
 
 // ─── Weather themes ───────────────────────────────────────────
 function buildTheme(condition, tempF) {
@@ -187,16 +195,19 @@ function conditionLabel(condition, tempF) {
   return `${labels[condition] ?? condition} · ${tempF}°F`;
 }
 
-// ─── Live weather fetch ───────────────────────────────────────
-// Uses Open-Meteo (free, no API key). Cached in localStorage per calendar day.
+// ─── Live weather fetch (hourly) ─────────────────────────────
+// Fetches the full hourly forecast from Open-Meteo (free, no API key).
+// Cached in localStorage per calendar day. Each pipe tunnel = +1 hour.
 async function fetchWeather() {
   const today  = new Date().toISOString().slice(0, 10);
-  const cached = localStorage.getItem('smv_weather_v2');
+  const cached = localStorage.getItem('smv_hourly_v1');
   if (cached) {
     try {
       const d = JSON.parse(cached);
       if (d.date === today) {
-        applyWeather(d.code, d.tempF);
+        hourlyForecast = d.forecast;
+        baseHourIndex  = d.baseHourIndex;
+        applyHourOffset(START_HR_OFFSET);
         return;
       }
     } catch (_) {}
@@ -205,24 +216,51 @@ async function fetchWeather() {
   try {
     const url = `https://api.open-meteo.com/v1/forecast` +
       `?latitude=${SMV_LAT}&longitude=${SMV_LON}` +
-      `&current=temperature_2m,weather_code` +
-      `&temperature_unit=fahrenheit&timezone=America%2FDenver`;
+      `&hourly=temperature_2m,weather_code` +
+      `&temperature_unit=fahrenheit&timezone=America%2FDenver&forecast_days=3`;
     const res  = await fetch(url);
     const json = await res.json();
-    const code = json.current.weather_code;
-    const temp = Math.round(json.current.temperature_2m);
-    localStorage.setItem('smv_weather_v2', JSON.stringify({ date: today, code, tempF: temp }));
-    applyWeather(code, temp);
+
+    hourlyForecast = json.hourly.time.map((t, i) => ({
+      isoTime: t,
+      code:    json.hourly.weather_code[i],
+      tempF:   Math.round(json.hourly.temperature_2m[i]),
+    }));
+
+    // Find the slot matching the current hour in Mountain Time
+    const nowMT   = new Date().toLocaleString('sv', { timeZone: 'America/Denver' });
+    const nowHour = nowMT.slice(0, 13).replace(' ', 'T'); // "2026-02-15T14"
+    baseHourIndex = hourlyForecast.findIndex(h => h.isoTime.startsWith(nowHour));
+    if (baseHourIndex === -1) baseHourIndex = 0;
+
+    localStorage.setItem('smv_hourly_v1', JSON.stringify({
+      date: today, forecast: hourlyForecast, baseHourIndex,
+    }));
+    applyHourOffset(START_HR_OFFSET);
   } catch (_) {
-    // fallback — keep snow default, mark as cached-unknown
     weatherLabel = conditionLabel('snow', 33) + ' (offline)';
   }
 }
 
-function applyWeather(code, tempF) {
-  const condition  = weatherCodeToCondition(code, tempF);
-  theme            = buildTheme(condition, tempF);
-  weatherLabel     = conditionLabel(condition, tempF);
+function applyHourOffset(offset) {
+  if (!hourlyForecast.length) return;
+  const idx = Math.min(baseHourIndex + offset, hourlyForecast.length - 1);
+  const h   = hourlyForecast[idx];
+  if (!h) return;
+
+  const condition = weatherCodeToCondition(h.code, h.tempF);
+  theme           = buildTheme(condition, h.tempF);
+
+  // Format Mountain Time label
+  // isoTime from Open-Meteo is already in local tz ("2026-02-15T14:00")
+  const [datePart, timePart] = h.isoTime.split('T');
+  const [hr, mn] = timePart.split(':').map(Number);
+  const ampm  = hr >= 12 ? 'PM' : 'AM';
+  const hr12  = ((hr + 11) % 12) + 1;
+  const timeStr = `${hr12}:${String(mn).padStart(2,'0')} ${ampm}`;
+  const offsetStr = offset === 0 ? 'Now' : `+${offset}h`;
+  weatherLabel = `${offsetStr} · ${conditionLabel(condition, h.tempF)} · ${timeStr}`;
+
   canvas.style.boxShadow = `0 0 40px ${theme.glowColor}`;
   resetParticles();
 }
@@ -321,9 +359,12 @@ function init() {
   frame         = 0;
   bgOffset      = 0;
   groundOff     = 0;
-  boardAngle    = 0;
-  boardRotSpeed = 0;
+  boardAngle        = 0;
+  boardRotSpeed     = 0;
+  lastScoreWeather  = -1;
   if (best === undefined) best = 0;
+  // Reset to current hour when starting a new game
+  applyHourOffset(START_HR_OFFSET);
 }
 init();
 
@@ -388,9 +429,15 @@ function update() {
     }
     if (rectCircle(p.x, 0, PIPE_WIDTH, p.top, BIRD_X, bird.y, BIRD_R)) die();
     const botTop = p.top + p.gap;
-    if (rectCircle(p.x, botTop, PIPE_WIDTH, H, BIRD_X, bird.y, BIRD_R)) die();
+    if (rectCircle(p.x, botTop, PIPE_WIDTH, H - GROUND_H - botTop, BIRD_X, bird.y, BIRD_R)) die();
   }
   pipes = pipes.filter(p => p.x > -PIPE_WIDTH - 10);
+
+  // Each tunnel passed advances the weather by one hour
+  if (score !== lastScoreWeather) {
+    lastScoreWeather = score;
+    applyHourOffset(START_HR_OFFSET + score * HR_PER_TUNNEL);
+  }
 
   if (bird.y + BIRD_R > H - GROUND_H || bird.y - BIRD_R < 0) die();
 }
@@ -497,12 +544,13 @@ function drawPipe(p) {
   ctx.fillRect(p.x + 6, 0, 8, p.top - rimH);
 
   const botTop = p.top + p.gap;
+  const botEnd = H - GROUND_H;
   ctx.fillStyle = theme.pipeBody;
-  roundRect(p.x, botTop + rimH, PIPE_WIDTH, H - botTop - rimH, 4);
+  roundRect(p.x, botTop + rimH, PIPE_WIDTH, botEnd - botTop - rimH, 4);
   ctx.fillStyle = theme.pipeRim;
   roundRect(rimX, botTop, rimW, rimH, 4);
   ctx.fillStyle = 'rgba(255,255,255,0.2)';
-  ctx.fillRect(p.x + 6, botTop + rimH, 8, H - botTop - rimH);
+  ctx.fillRect(p.x + 6, botTop + rimH, 8, botEnd - botTop - rimH);
 
   if (theme.pipeCap) {
     ctx.fillStyle = 'rgba(240,248,255,0.92)';
@@ -664,6 +712,10 @@ function render() {
 
 function loop() {
   update();
+  // Fill corners that get exposed by rotation with sky color so they blend in
+  ctx.fillStyle = theme.skyTop;
+  ctx.fillRect(0, 0, W, H);
+  // Rotate game content around canvas center; frame/shadow stays fixed
   ctx.save();
   ctx.translate(W / 2, H / 2);
   ctx.rotate(boardAngle);
@@ -673,6 +725,7 @@ function loop() {
   requestAnimationFrame(loop);
 }
 
+canvas.style.transform = '';   // clear any leftover CSS rotation
 // Start game loop immediately (uses default snow theme while fetch runs)
 loop();
 
