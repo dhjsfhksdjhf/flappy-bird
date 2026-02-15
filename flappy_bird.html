@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Flappy Bird — Snowmass Village</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a2530;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    font-family: 'Arial Black', sans-serif;
+    overflow: hidden;
+  }
+  canvas {
+    display: block;
+    image-rendering: pixelated;
+    box-shadow: 0 0 40px rgba(160,210,240,0.35);
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+const canvas = document.getElementById('game');
+const ctx    = canvas.getContext('2d');
+
+const W = 400, H = 600;
+canvas.width = W; canvas.height = H;
+
+// ─── Game constants ───────────────────────────────────────────
+const GRAVITY    = 0.30;
+const FLAP_FORCE = -6.0;
+const PIPE_WIDTH = 60;
+const GROUND_H   = 80;
+const BIRD_X     = 90;
+const BIRD_R     = 16;
+const SPEED_MIN  = 3, SPEED_MAX = 6.5;
+const GAP_MIN    = 105, GAP_MAX  = 150;
+const SPAWN_MIN  = 170, SPAWN_MAX = 280;
+
+function difficulty() {
+  const t    = Math.min(score / 30, 1);
+  const ease = t * t * (3 - 2 * t);
+  return {
+    speed: SPEED_MIN + ease * (SPEED_MAX - SPEED_MIN),
+    gap:   GAP_MAX   - ease * (GAP_MAX  - GAP_MIN),
+    spawn: Math.round(SPAWN_MAX - ease * (SPAWN_MAX - SPAWN_MIN)),
+  };
+}
+
+// ─── Board rotation ───────────────────────────────────────────
+const ROT_ACCEL = 0.0000025;
+const ROT_MAX   = 0.018;
+
+// ─── Weather state ────────────────────────────────────────────
+// Snowmass Village, CO — lat/lon
+const SMV_LAT = 39.1955, SMV_LON = -106.9394;
+
+// Active theme — set by applyWeather(); defaults to snow until fetch completes
+let theme = buildTheme('snow', 33);
+// Human-readable label shown on start screen
+let weatherLabel = 'Loading weather…';
+
+// ─── Weather themes ───────────────────────────────────────────
+function buildTheme(condition, tempF) {
+  const T = {
+    // sky
+    skyTop: '#4ec0f5', skyBot: '#a8e0ff',
+    // ground
+    groundTop: '#ded895', groundBot: '#c2b14a', groundAccent: '#8cc63f',
+    groundStyle: 'normal',   // 'normal' | 'snow' | 'wet'
+    // pipes
+    pipeBody: '#74c442', pipeRim: '#558a2e',
+    pipeCap: false,           // snow cap on bottom rim
+    // clouds
+    cloudStyle: 'fluffy',     // 'fluffy' | 'storm' | 'fog'
+    // precipitation
+    precip: 'none',           // 'none' | 'snow' | 'rain' | 'heavyrain'
+    // extras
+    fogAlpha: 0,
+    lightning: false,
+    // page glow colour passed to CSS
+    glowColor: 'rgba(0,200,255,0.3)',
+  };
+
+  switch (condition) {
+    case 'clear':
+      // sunny blue sky, original palette
+      break;
+
+    case 'partlyCloudy':
+      T.skyTop = '#5fb8e8'; T.skyBot = '#b5d9f0';
+      T.cloudStyle = 'fluffy';
+      break;
+
+    case 'overcast':
+      T.skyTop = '#7a8fa0'; T.skyBot = '#b8ccd8';
+      T.pipeBody = '#5a8060'; T.pipeRim = '#3d5e45';
+      T.cloudStyle = 'storm';
+      T.glowColor = 'rgba(120,160,190,0.3)';
+      break;
+
+    case 'fog':
+      T.skyTop = '#aab8be'; T.skyBot = '#d5dfe3';
+      T.cloudStyle = 'fog';
+      T.fogAlpha = 0.38;
+      T.groundTop = '#c8d4d8'; T.groundBot = '#a8b8c0'; T.groundAccent = '#7a9080';
+      T.glowColor = 'rgba(180,200,210,0.25)';
+      break;
+
+    case 'snow':
+      T.skyTop = '#6b7f8f'; T.skyBot = '#b0c4d4';
+      T.groundTop = '#e8eef4'; T.groundBot = '#c0d0dc'; T.groundAccent = '#f0f5f8';
+      T.groundStyle = 'snow';
+      T.pipeBody = '#5a8f6e'; T.pipeRim = '#3d6b50';
+      T.pipeCap = true;
+      T.cloudStyle = 'storm';
+      T.precip = 'snow';
+      T.glowColor = 'rgba(160,210,240,0.35)';
+      break;
+
+    case 'rain':
+      T.skyTop = '#4a5e6e'; T.skyBot = '#7a96a8';
+      T.groundTop = '#6a7860'; T.groundBot = '#4e5e48'; T.groundAccent = '#5a7050';
+      T.groundStyle = 'wet';
+      T.pipeBody = '#487050'; T.pipeRim = '#305840';
+      T.cloudStyle = 'storm';
+      T.precip = 'rain';
+      T.glowColor = 'rgba(80,130,160,0.35)';
+      break;
+
+    case 'heavyrain':
+      T.skyTop = '#2e3d48'; T.skyBot = '#506070';
+      T.groundTop = '#5a6852'; T.groundBot = '#3e4e3a'; T.groundAccent = '#4a6040';
+      T.groundStyle = 'wet';
+      T.pipeBody = '#3a6048'; T.pipeRim = '#284838';
+      T.cloudStyle = 'storm';
+      T.precip = 'heavyrain';
+      T.glowColor = 'rgba(60,100,130,0.4)';
+      break;
+
+    case 'thunderstorm':
+      T.skyTop = '#1e2830'; T.skyBot = '#354858';
+      T.groundTop = '#506050'; T.groundBot = '#384838'; T.groundAccent = '#406040';
+      T.groundStyle = 'wet';
+      T.pipeBody = '#305040'; T.pipeRim = '#204030';
+      T.cloudStyle = 'storm';
+      T.precip = 'heavyrain';
+      T.lightning = true;
+      T.glowColor = 'rgba(40,80,110,0.45)';
+      break;
+  }
+
+  T.condition = condition;
+  T.tempF     = tempF;
+  return T;
+}
+
+function weatherCodeToCondition(code, tempF) {
+  if (code === 0 || code === 1)                   return 'clear';
+  if (code === 2)                                 return 'partlyCloudy';
+  if (code === 3)                                 return 'overcast';
+  if (code === 45 || code === 48)                 return 'fog';
+  if ([71,73,75,77,85,86,56,57].includes(code))  return 'snow';
+  // freezing rain below 35°F is also snow-ish
+  if ((code === 66 || code === 67) && tempF < 35) return 'snow';
+  if (code === 95 || code === 96 || code === 99)  return 'thunderstorm';
+  if (code === 82 || code === 65 || code === 67)  return 'heavyrain';
+  // remaining: drizzle / light-moderate rain
+  return 'rain';
+}
+
+function conditionLabel(condition, tempF) {
+  const labels = {
+    clear:        'Clear',
+    partlyCloudy: 'Partly Cloudy',
+    overcast:     'Overcast',
+    fog:          'Foggy',
+    snow:         'Snowing',
+    rain:         'Rainy',
+    heavyrain:    'Heavy Rain',
+    thunderstorm: 'Thunderstorm',
+  };
+  return `${labels[condition] ?? condition} · ${tempF}°F`;
+}
+
+// ─── Live weather fetch ───────────────────────────────────────
+// Uses Open-Meteo (free, no API key). Cached in localStorage per calendar day.
+async function fetchWeather() {
+  const today  = new Date().toISOString().slice(0, 10);
+  const cached = localStorage.getItem('smv_weather_v2');
+  if (cached) {
+    try {
+      const d = JSON.parse(cached);
+      if (d.date === today) {
+        applyWeather(d.code, d.tempF);
+        return;
+      }
+    } catch (_) {}
+  }
+
+  try {
+    const url = `https://api.open-meteo.com/v1/forecast` +
+      `?latitude=${SMV_LAT}&longitude=${SMV_LON}` +
+      `&current=temperature_2m,weather_code` +
+      `&temperature_unit=fahrenheit&timezone=America%2FDenver`;
+    const res  = await fetch(url);
+    const json = await res.json();
+    const code = json.current.weather_code;
+    const temp = Math.round(json.current.temperature_2m);
+    localStorage.setItem('smv_weather_v2', JSON.stringify({ date: today, code, tempF: temp }));
+    applyWeather(code, temp);
+  } catch (_) {
+    // fallback — keep snow default, mark as cached-unknown
+    weatherLabel = conditionLabel('snow', 33) + ' (offline)';
+  }
+}
+
+function applyWeather(code, tempF) {
+  const condition  = weatherCodeToCondition(code, tempF);
+  theme            = buildTheme(condition, tempF);
+  weatherLabel     = conditionLabel(condition, tempF);
+  canvas.style.boxShadow = `0 0 40px ${theme.glowColor}`;
+  resetParticles();
+}
+
+// ─── Particles ────────────────────────────────────────────────
+let snowflakes = [], raindrops = [];
+
+function resetParticles() {
+  snowflakes = [];
+  raindrops  = [];
+  if (theme.precip === 'snow') {
+    snowflakes = Array.from({ length: 90 }, () => ({
+      x: Math.random() * W, y: Math.random() * H,
+      r: 0.8 + Math.random() * 2.2,
+      speed: 0.6 + Math.random() * 1.4,
+      drift: (Math.random() - 0.6) * 0.5,
+      wobble: Math.random() * Math.PI * 2,
+    }));
+  }
+  if (theme.precip === 'rain' || theme.precip === 'heavyrain') {
+    const count = theme.precip === 'heavyrain' ? 140 : 80;
+    raindrops = Array.from({ length: count }, () => ({
+      x: Math.random() * W, y: Math.random() * H,
+      len: 8 + Math.random() * 10,
+      speed: 8 + Math.random() * 6,
+      angle: 0.18,   // slight angle — wind from left
+    }));
+  }
+}
+resetParticles(); // init with default snow theme
+
+function updateParticles() {
+  for (const s of snowflakes) {
+    s.wobble += 0.03;
+    s.x += s.drift + Math.sin(s.wobble) * 0.3;
+    s.y += s.speed;
+    if (s.y > H + 4) { s.y = -4; s.x = Math.random() * W; }
+    if (s.x > W + 4) s.x = -4;
+    if (s.x < -4)    s.x = W + 4;
+  }
+  for (const r of raindrops) {
+    r.x += Math.sin(r.angle) * r.speed * 0.4;
+    r.y += r.speed;
+    if (r.y > H + r.len) { r.y = -r.len; r.x = Math.random() * W; }
+    if (r.x > W + 10)     r.x = -10;
+  }
+}
+
+let lightningTimer = 0;
+
+function drawParticles() {
+  // Snow
+  if (snowflakes.length) {
+    ctx.fillStyle = 'rgba(255,255,255,0.82)';
+    for (const s of snowflakes) {
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  // Rain
+  if (raindrops.length) {
+    ctx.strokeStyle = 'rgba(174,214,241,0.65)';
+    ctx.lineWidth = 1;
+    for (const r of raindrops) {
+      ctx.beginPath();
+      ctx.moveTo(r.x, r.y);
+      ctx.lineTo(r.x - Math.sin(r.angle) * r.len, r.y - r.len);
+      ctx.stroke();
+    }
+  }
+  // Fog overlay
+  if (theme.fogAlpha > 0) {
+    ctx.fillStyle = `rgba(220,230,232,${theme.fogAlpha})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+  // Lightning
+  if (theme.lightning) {
+    lightningTimer--;
+    if (lightningTimer <= 0) {
+      lightningTimer = Math.floor(Math.random() * 300 + 120);
+      ctx.fillStyle = 'rgba(255,255,240,0.22)';
+      ctx.fillRect(0, 0, W, H);
+    }
+  }
+}
+
+// ─── Game state ───────────────────────────────────────────────
+let state, bird, pipes, score, best, frame, bgOffset, groundOff, boardAngle, boardRotSpeed;
+
+function init() {
+  state         = 'start';
+  bird          = { y: H / 2 - 20, vy: 0, rot: 0, flapAnim: 0 };
+  pipes         = [];
+  score         = 0;
+  frame         = 0;
+  bgOffset      = 0;
+  groundOff     = 0;
+  boardAngle    = 0;
+  boardRotSpeed = 0;
+  if (best === undefined) best = 0;
+}
+init();
+
+// ─── Input ────────────────────────────────────────────────────
+function flap() {
+  if (state === 'start') state = 'play';
+  if (state === 'play')  { bird.vy = FLAP_FORCE; bird.flapAnim = 1; }
+  if (state === 'dead')  init();
+}
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space' || e.code === 'ArrowUp') { e.preventDefault(); flap(); }
+});
+canvas.addEventListener('mousedown', flap);
+canvas.addEventListener('touchstart', e => { e.preventDefault(); flap(); }, { passive: false });
+
+// ─── Helpers ──────────────────────────────────────────────────
+function randBetween(a, b) { return a + Math.random() * (b - a); }
+
+function spawnPipe() {
+  const { gap } = difficulty();
+  const top = randBetween(80, H - GROUND_H - gap - 80);
+  pipes.push({ x: W + PIPE_WIDTH, top, gap, scored: false });
+}
+
+function rectCircle(rx, ry, rw, rh, cx, cy, cr) {
+  const nx = Math.max(rx, Math.min(cx, rx + rw));
+  const ny = Math.max(ry, Math.min(cy, ry + rh));
+  const dx = cx - nx, dy = cy - ny;
+  return dx * dx + dy * dy < (cr - 3) * (cr - 3);
+}
+
+// ─── Update ───────────────────────────────────────────────────
+function update() {
+  frame++;
+  bgOffset  = (bgOffset  + 0.4) % W;
+  const spd = state === 'play' ? difficulty().speed : SPEED_MIN;
+  groundOff = (groundOff + spd) % 40;
+
+  updateParticles();
+
+  if (state !== 'play') return;
+
+  // Board rotation — Z-axis (into screen), perpendicular to horizontal travel
+  boardRotSpeed  = Math.min(boardRotSpeed + ROT_ACCEL, ROT_MAX);
+  boardAngle    += boardRotSpeed;
+
+  // Bird physics
+  bird.vy += GRAVITY;
+  bird.vy  = Math.min(bird.vy, 9);
+  bird.y  += bird.vy;
+  bird.rot = Math.max(-25, Math.min(90, bird.vy * 6));
+  if (bird.flapAnim > 0) bird.flapAnim -= 0.12;
+
+  const diff = difficulty();
+  if (frame % diff.spawn === 0) spawnPipe();
+
+  for (const p of pipes) {
+    p.x -= diff.speed;
+    if (!p.scored && p.x + PIPE_WIDTH < BIRD_X) {
+      p.scored = true; score++;
+      if (score > best) best = score;
+    }
+    if (rectCircle(p.x, 0, PIPE_WIDTH, p.top, BIRD_X, bird.y, BIRD_R)) die();
+    const botTop = p.top + p.gap;
+    if (rectCircle(p.x, botTop, PIPE_WIDTH, H, BIRD_X, bird.y, BIRD_R)) die();
+  }
+  pipes = pipes.filter(p => p.x > -PIPE_WIDTH - 10);
+
+  if (bird.y + BIRD_R > H - GROUND_H || bird.y - BIRD_R < 0) die();
+}
+
+function die() { state = 'dead'; bird.vy = FLAP_FORCE * 0.7; }
+
+// ─── Drawing ──────────────────────────────────────────────────
+function drawBackground() {
+  const grad = ctx.createLinearGradient(0, 0, 0, H - GROUND_H);
+  grad.addColorStop(0, theme.skyTop);
+  grad.addColorStop(1, theme.skyBot);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H - GROUND_H);
+
+  const cloudPositions = [[20,90],[160,60],[290,100],[80,150],[230,130]];
+  cloudPositions.forEach(([cx, cy]) => {
+    const ox = ((cx - bgOffset * 0.4) % (W + 120) + W + 120) % (W + 120) - 60;
+    if (theme.cloudStyle === 'fluffy') drawFluffyCloud(ox, cy);
+    else if (theme.cloudStyle === 'storm') drawStormCloud(ox, cy);
+    else drawFogBank(ox, cy);
+  });
+}
+
+function drawFluffyCloud(x, y) {
+  ctx.fillStyle = 'rgba(255,255,255,0.75)';
+  ctx.beginPath();
+  ctx.arc(x,      y,      22, 0, Math.PI * 2);
+  ctx.arc(x + 28, y - 5,  18, 0, Math.PI * 2);
+  ctx.arc(x + 52, y,      20, 0, Math.PI * 2);
+  ctx.arc(x + 25, y + 8,  18, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawStormCloud(x, y) {
+  ctx.fillStyle = 'rgba(90,105,118,0.72)';
+  ctx.beginPath();
+  ctx.arc(x,      y,      32, 0, Math.PI * 2);
+  ctx.arc(x + 38, y - 8,  26, 0, Math.PI * 2);
+  ctx.arc(x + 72, y,      30, 0, Math.PI * 2);
+  ctx.arc(x + 36, y + 14, 26, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(160,178,192,0.45)';
+  ctx.beginPath();
+  ctx.arc(x + 10, y - 10, 18, 0, Math.PI * 2);
+  ctx.arc(x + 40, y - 16, 16, 0, Math.PI * 2);
+  ctx.arc(x + 62, y - 8,  14, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawFogBank(x, y) {
+  ctx.fillStyle = 'rgba(200,212,218,0.55)';
+  ctx.beginPath();
+  ctx.arc(x,      y,      40, 0, Math.PI * 2);
+  ctx.arc(x + 50, y - 5,  35, 0, Math.PI * 2);
+  ctx.arc(x + 95, y,      38, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawGround() {
+  const dg = ctx.createLinearGradient(0, H - GROUND_H, 0, H);
+  dg.addColorStop(0, theme.groundTop);
+  dg.addColorStop(1, theme.groundBot);
+  ctx.fillStyle = dg;
+  ctx.fillRect(0, H - GROUND_H, W, GROUND_H);
+
+  if (theme.groundStyle === 'snow') {
+    ctx.fillStyle = '#f0f5f8';
+    ctx.fillRect(0, H - GROUND_H, W, 10);
+    ctx.strokeStyle = 'rgba(180,200,215,0.6)';
+    ctx.lineWidth = 1.5;
+    for (let x = -groundOff * 1.5; x < W + 40; x += 40) {
+      ctx.beginPath();
+      ctx.moveTo(x,      H - GROUND_H + 20);
+      ctx.quadraticCurveTo(x + 20, H - GROUND_H + 14, x + 40, H - GROUND_H + 20);
+      ctx.stroke();
+    }
+  } else if (theme.groundStyle === 'wet') {
+    ctx.fillStyle = theme.groundAccent;
+    ctx.fillRect(0, H - GROUND_H, W, 10);
+    ctx.fillStyle = 'rgba(120,160,180,0.25)';
+    for (let x = -groundOff * 0.8; x < W + 40; x += 55) {
+      ctx.beginPath();
+      ctx.ellipse(x + 20, H - GROUND_H + 28, 18, 5, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  } else {
+    ctx.fillStyle = theme.groundAccent;
+    ctx.fillRect(0, H - GROUND_H, W, 12);
+    ctx.fillStyle = 'rgba(0,0,0,0.1)';
+    for (let x = -groundOff; x < W; x += 40) {
+      ctx.fillRect(x, H - GROUND_H, 2, 12);
+    }
+  }
+}
+
+function drawPipe(p) {
+  const rimH = 18, rimW = PIPE_WIDTH + 10, rimX = p.x - 5;
+
+  ctx.fillStyle = theme.pipeBody;
+  roundRect(p.x, 0, PIPE_WIDTH, p.top - rimH, 4);
+  ctx.fillStyle = theme.pipeRim;
+  roundRect(rimX, p.top - rimH, rimW, rimH, 4);
+  ctx.fillStyle = 'rgba(255,255,255,0.2)';
+  ctx.fillRect(p.x + 6, 0, 8, p.top - rimH);
+
+  const botTop = p.top + p.gap;
+  ctx.fillStyle = theme.pipeBody;
+  roundRect(p.x, botTop + rimH, PIPE_WIDTH, H - botTop - rimH, 4);
+  ctx.fillStyle = theme.pipeRim;
+  roundRect(rimX, botTop, rimW, rimH, 4);
+  ctx.fillStyle = 'rgba(255,255,255,0.2)';
+  ctx.fillRect(p.x + 6, botTop + rimH, 8, H - botTop - rimH);
+
+  if (theme.pipeCap) {
+    ctx.fillStyle = 'rgba(240,248,255,0.92)';
+    ctx.beginPath();
+    ctx.ellipse(rimX + rimW / 2, botTop + 3, rimW / 2 - 2, 7, 0, Math.PI, 0);
+    ctx.fill();
+  }
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawBird() {
+  ctx.save();
+  ctx.translate(BIRD_X, bird.y);
+  ctx.rotate((bird.rot * Math.PI) / 180);
+
+  ctx.fillStyle = 'rgba(0,0,0,0.15)';
+  ctx.beginPath();
+  ctx.ellipse(2, BIRD_R + 2, BIRD_R * 0.9, 5, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  const wingY = bird.flapAnim > 0 ? -8 : 6;
+  ctx.fillStyle = '#f5a623';
+  ctx.beginPath();
+  ctx.ellipse(-4, wingY, 10, 7, -0.4, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = '#ffe234';
+  ctx.beginPath();
+  ctx.arc(0, 0, BIRD_R, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = '#fff9a0';
+  ctx.beginPath();
+  ctx.ellipse(4, 5, 9, 7, 0.3, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(8, -5, 6, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = '#1a1a1a';
+  ctx.beginPath();
+  ctx.arc(9.5, -5, 3, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(10.5, -6.5, 1.2, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = '#f76c1b';
+  ctx.beginPath();
+  ctx.moveTo(10, -1); ctx.lineTo(22, 2); ctx.lineTo(10, 5);
+  ctx.closePath(); ctx.fill();
+
+  ctx.strokeStyle = '#c0540e'; ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.moveTo(10, 2); ctx.lineTo(20, 2);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawScore() {
+  ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.font = 'bold 46px Arial Black';
+  ctx.fillText(score, W / 2 + 3, 73);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(score, W / 2, 70);
+  ctx.strokeStyle = '#555'; ctx.lineWidth = 2;
+  ctx.strokeText(score, W / 2, 70);
+}
+
+function drawPanel(title, lines) {
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  roundRect(W / 2 - 130, H / 2 - 120, 260, 240, 18);
+  ctx.fillStyle = '#fffde7';
+  roundRect(W / 2 - 126, H / 2 - 116, 252, 232, 14);
+
+  ctx.fillStyle = '#e65100';
+  ctx.font = 'bold 32px Arial Black';
+  ctx.textAlign = 'center';
+  ctx.fillText(title, W / 2, H / 2 - 72);
+
+  ctx.fillStyle = '#333';
+  ctx.font = 'bold 18px Arial';
+  lines.forEach((line, i) => ctx.fillText(line, W / 2, H / 2 - 32 + i * 32));
+
+  const pulse = 0.7 + 0.3 * Math.sin(frame * 0.08);
+  ctx.fillStyle = `rgba(230,81,0,${pulse})`;
+  ctx.font = 'bold 15px Arial';
+  ctx.fillText('SPACE / TAP to continue', W / 2, H / 2 + 96);
+}
+
+function drawDiffBadge() {
+  const t      = Math.min(score / 30, 1);
+  const level  = t < 0.25 ? 'EASY' : t < 0.55 ? 'MEDIUM' : t < 0.85 ? 'HARD' : 'INSANE';
+  const colour = t < 0.25 ? '#4caf50' : t < 0.55 ? '#ff9800' : t < 0.85 ? '#f44336' : '#e040fb';
+  ctx.save();
+  ctx.textAlign = 'right';
+  ctx.font = 'bold 13px Arial Black';
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillText(level, W - 11, 21);
+  ctx.fillStyle = colour;
+  ctx.fillText(level, W - 12, 20);
+  ctx.restore();
+}
+
+function drawWeatherBadge() {
+  ctx.save();
+  ctx.textAlign = 'left';
+  ctx.font = 'bold 11px Arial';
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillText('Snowmass Village', 13, 19);
+  ctx.fillText(weatherLabel, 13, 33);
+  ctx.fillStyle = 'rgba(255,255,255,0.75)';
+  ctx.fillText('Snowmass Village', 12, 18);
+  ctx.fillText(weatherLabel, 12, 32);
+  ctx.restore();
+}
+
+// ─── Main loop ────────────────────────────────────────────────
+function render() {
+  drawBackground();
+  for (const p of pipes) drawPipe(p);
+  drawGround();
+  drawParticles();
+  drawBird();
+
+  if (state === 'play' || state === 'dead') {
+    drawScore();
+    drawDiffBadge();
+  }
+  drawWeatherBadge();
+
+  if (state === 'start') {
+    drawPanel('FLAPPY BIRD', ['SPACE or TAP to flap!', 'Gets faster & harder', `as you score higher!`, `Best: ${best}`]);
+  }
+  if (state === 'dead') {
+    drawPanel('GAME OVER', [`Score: ${score}`, `Best:  ${best}`, '', 'Try again?']);
+  }
+}
+
+function loop() {
+  update();
+  ctx.save();
+  ctx.translate(W / 2, H / 2);
+  ctx.rotate(boardAngle);
+  ctx.translate(-W / 2, -H / 2);
+  render();
+  ctx.restore();
+  requestAnimationFrame(loop);
+}
+
+// Start game loop immediately (uses default snow theme while fetch runs)
+loop();
+
+// Fetch real weather — updates theme as soon as response arrives
+fetchWeather();
+</script>
+</body>
+</html>
